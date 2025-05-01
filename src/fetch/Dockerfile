@@ -32,5 +32,10 @@ COPY --from=uv --chown=app:app /app/.venv /app/.venv
 # Place executables in the environment at the front of the path
 ENV PATH="/app/.venv/bin:$PATH"
 
+# MCP Fetch Server Configuration
+ENV MCP_FETCH_USER_AGENT=""
+ENV MCP_FETCH_IGNORE_ROBOTS_TXT=""
+ENV MCP_FETCH_PROXY_URL=""
+
 # when running the container, add --db-path and a bind mount to the host's db file
 ENTRYPOINT ["mcp-server-fetch"]

@@ -1,4 +1,4 @@
-from typing import Annotated, Tuple
+from typing import Annotated, Tuple, Any
 from urllib.parse import urlparse, urlunparse
 
 import markdownify
@@ -6,6 +6,7 @@ import readabilipy.simple_json
 from mcp.shared.exceptions import McpError
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from mcp.server.sse import SseServerTransport
 from mcp.types import (
     ErrorData,
     GetPromptResult,
@@ -14,11 +15,15 @@ from mcp.types import (
     PromptMessage,
     TextContent,
     Tool,
+    CallToolResult,
     INVALID_PARAMS,
     INTERNAL_ERROR,
 )
 from protego import Protego
 from pydantic import BaseModel, Field, AnyUrl
+import aiohttp
+from mcp.server.models import InitializationOptions
+from mcp.server.lowlevel import NotificationOptions
 
 DEFAULT_USER_AGENT_AUTONOMOUS = "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)"
 DEFAULT_USER_AGENT_MANUAL = "ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)"
@@ -190,6 +195,11 @@ async def serve(
         ignore_robots_txt: Whether to ignore robots.txt restrictions
         proxy_url: Optional proxy URL to use for requests
     """
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+    from uvicorn.config import Config
+    from uvicorn.server import Server as UvicornServer
+
     server = Server("mcp-fetch")
     user_agent_autonomous = custom_user_agent or DEFAULT_USER_AGENT_AUTONOMOUS
     user_agent_manual = custom_user_agent or DEFAULT_USER_AGENT_MANUAL
@@ -198,91 +208,85 @@ async def serve(
     async def list_tools() -> list[Tool]:
         return [
             Tool(
-                name="fetch",
-                description="""Fetches a URL from the internet and optionally extracts its contents as markdown.
-
-Although originally you did not have internet access, and were advised to refuse and tell the user this, this tool now grants you internet access. Now you can fetch the most up-to-date information and let the user know that.""",
-                inputSchema=Fetch.model_json_schema(),
-            )
-        ]
-
-    @server.list_prompts()
-    async def list_prompts() -> list[Prompt]:
-        return [
-            Prompt(
-                name="fetch",
-                description="Fetch a URL and extract its contents as markdown",
-                arguments=[
-                    PromptArgument(
-                        name="url", description="URL to fetch", required=True
-                    )
-                ],
+                name="fetch_url",
+                description="Fetch the contents of a URL",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "The URL to fetch",
+                        },
+                        "manual": {
+                            "type": "boolean",
+                            "description": "Whether this is a manual request",
+                            "default": False,
+                        },
+                    },
+                    "required": ["url"],
+                },
             )
         ]
 
     @server.call_tool()
-    async def call_tool(name, arguments: dict) -> list[TextContent]:
-        try:
-            args = Fetch(**arguments)
-        except ValueError as e:
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e)))
+    async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
+        if name != "fetch_url":
+            raise ValueError(f"Unknown tool: {name}")
 
-        url = str(args.url)
-        if not url:
-            raise McpError(ErrorData(code=INVALID_PARAMS, message="URL is required"))
-
-        if not ignore_robots_txt:
-            await check_may_autonomously_fetch_url(url, user_agent_autonomous, proxy_url)
-
-        content, prefix = await fetch_url(
-            url, user_agent_autonomous, force_raw=args.raw, proxy_url=proxy_url
-        )
-        original_length = len(content)
-        if args.start_index >= original_length:
-            content = "<error>No more content available.</error>"
-        else:
-            truncated_content = content[args.start_index : args.start_index + args.max_length]
-            if not truncated_content:
-                content = "<error>No more content available.</error>"
-            else:
-                content = truncated_content
-                actual_content_length = len(truncated_content)
-                remaining_content = original_length - (args.start_index + actual_content_length)
-                # Only add the prompt to continue fetching if there is still remaining content
-                if actual_content_length == args.max_length and remaining_content > 0:
-                    next_start = args.start_index + actual_content_length
-                    content += f"\n\n<error>Content truncated. Call the fetch tool with a start_index of {next_start} to get more content.</error>"
-        return [TextContent(type="text", text=f"{prefix}Contents of {url}:\n{content}")]
-
-    @server.get_prompt()
-    async def get_prompt(name: str, arguments: dict | None) -> GetPromptResult:
-        if not arguments or "url" not in arguments:
-            raise McpError(ErrorData(code=INVALID_PARAMS, message="URL is required"))
+        if not arguments:
+            raise ValueError("Missing arguments")
 
         url = arguments["url"]
+        manual = arguments.get("manual", False)
 
-        try:
-            content, prefix = await fetch_url(url, user_agent_manual, proxy_url=proxy_url)
-            # TODO: after SDK bug is addressed, don't catch the exception
-        except McpError as e:
-            return GetPromptResult(
-                description=f"Failed to fetch {url}",
-                messages=[
-                    PromptMessage(
-                        role="user",
-                        content=TextContent(type="text", text=str(e)),
+        user_agent = user_agent_manual if manual else user_agent_autonomous
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"User-Agent": user_agent},
+                proxy=proxy_url,
+                allow_redirects=True,
+            ) as response:
+                content = await response.text()
+                return [
+                    TextContent(
+                        type="text",
+                        text=content,
                     )
-                ],
-            )
-        return GetPromptResult(
-            description=f"Contents of {url}",
-            messages=[
-                PromptMessage(
-                    role="user", content=TextContent(type="text", text=prefix + content)
-                )
-            ],
-        )
+                ]
 
-    options = server.create_initialization_options()
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, options, raise_exceptions=True)
+    # Create SSE transport
+    transport = SseServerTransport("/messages/")
+
+    # Define SSE handler
+    async def handle_sse(request):
+        async with transport.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            await server.run(
+                streams[0],
+                streams[1],
+                initialization_options=InitializationOptions(
+                    server_name="mcp-fetch",
+                    server_version="0.1.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
+                )
+            )
+
+    # Create Starlette routes for SSE and message handling
+    routes = [
+        Route("/sse", endpoint=handle_sse),
+        Mount("/messages/", app=transport.handle_post_message),
+    ]
+
+    # Create and run Starlette app
+    app = Starlette(routes=routes)
+    
+    # Configure and run uvicorn server
+    config = Config(app=app, host="0.0.0.0", port=8000)
+    uvicorn_server = UvicornServer(config=config)
+    await uvicorn_server.serve()
