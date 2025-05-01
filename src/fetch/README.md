@@ -1,5 +1,7 @@
 # Fetch MCP Server
 
+[![](https://phala-cloud-git-templates-phala.vercel.app/deploy-button.svg)](https://cloud.phala.network/templates/mcp-server-fetch)
+
 A Model Context Protocol server that provides web content fetching capabilities. This server enables LLMs to retrieve and process content from web pages, converting HTML to markdown for easier consumption.
 
 The fetch tool will truncate the response, but by using the `start_index` argument, you can specify where to start the content extraction. This lets models read a webpage in chunks, until they find the information they need.
