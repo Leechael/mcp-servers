@@ -1,0 +1,10 @@
+services:
+  mcp-server-fetch:
+    image: leechael/mcp-server-fetch:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - MCP_FETCH_USER_AGENT=${MCP_FETCH_USER_AGENT}
+      - MCP_FETCH_IGNORE_ROBOTS_TXT=${MCP_FETCH_IGNORE_ROBOTS_TXT}
+      - MCP_FETCH_PROXY_URL=${MCP_FETCH_PROXY_URL}
+    restart: unless-stopped
