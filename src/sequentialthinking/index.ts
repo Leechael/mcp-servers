@@ -9,6 +9,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 // Fixed chalk import for ESM
 import chalk from 'chalk';
+import express from "express";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 
 interface ThoughtData {
   thought: string;
@@ -266,13 +268,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   };
 });
 
-async function runServer() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Sequential Thinking MCP Server running on stdio");
-}
+const app = express();
+app.use(express.json());
 
-runServer().catch((error) => {
-  console.error("Fatal error running server:", error);
-  process.exit(1);
+const POST_ENDPOINT = "/message";
+const transports: { [sessionId: string]: SSEServerTransport } = {};
+
+app.get("/sse", (req, res) => {
+  const transport = new SSEServerTransport(POST_ENDPOINT, res);
+  transports[transport.sessionId] = transport;
+
+  res.on("close", () => {
+    delete transports[transport.sessionId];
+  });
+
+  server.connect(transport);
+});
+
+app.post(POST_ENDPOINT, (req, res) => {
+  const sessionId = req.query.sessionId;
+  if (typeof sessionId !== "string" || !transports[sessionId]) {
+    res.status(400).send({ message: "Invalid sessionId" });
+    return;
+  }
+  transports[sessionId].handlePostMessage(req, res, req.body);
+});
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.error(`Sequential Thinking MCP Server running with SSE on port ${PORT}`);
 });
