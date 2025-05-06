@@ -1,5 +1,7 @@
 # Sequential Thinking MCP Server
 
+[![](https://phala-cloud-git-templates-phala.vercel.app/deploy-button.svg)](https://cloud.phala.network/templates/mcp-server-sequential-thinking)
+
 An MCP server implementation that provides a tool for dynamic and reflective problem-solving through a structured thinking process.
 
 ## Features

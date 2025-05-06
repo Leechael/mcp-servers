@@ -1,0 +1,6 @@
+services:
+  mcp-server-fetch:
+    image: leechael/mcp-server-sequentialthinking:latest
+    ports:
+      - "8000:3001"
+    restart: unless-stopped
